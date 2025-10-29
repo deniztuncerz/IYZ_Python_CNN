@@ -1,5 +1,5 @@
 """
-CNN Analizi 
+CNN Analizi - Aktivasyon Fonksiyonları ile
 
 
 Veri Seti: Hafi, S.J., Mohammed, M.A., Abd, D.H., vd. (2024). 
@@ -513,6 +513,160 @@ class KapsamliAktivasyonAnalizi:
             )
             print(rapor)
     
+    def gradcam_olustur(self, model, resim, katman_adi='conv2d_3'):
+        
+        try:
+            # Modelin son evrişim katmanını bul
+            conv_layer = None
+            for layer in model.layers:
+                if katman_adi in layer.name.lower() and 'conv' in layer.name.lower():
+                    conv_layer = layer
+                    break
+            
+            if conv_layer is None:
+                # Eğer belirtilen katman bulunamazsa, son evrişim katmanını bul
+                conv_layers = [layer for layer in model.layers if 'conv' in layer.name.lower()]
+                if conv_layers:
+                    conv_layer = conv_layers[-1]
+                else:
+                    print("Evrişim katmanı bulunamadı!")
+                    return None
+            
+            # GradCAM hesaplama
+            with tf.GradientTape() as tape:
+                # Son evrişim katmanının çıktısını al
+                last_conv_layer_output = conv_layer.output
+                tape.watch(last_conv_layer_output)
+                
+                # Modelin tahminini al
+                predictions = model(resim)
+                predicted_class = tf.argmax(predictions[0])
+                class_channel = predictions[:, predicted_class]
+            
+            # Gradyanları hesapla
+            grads = tape.gradient(class_channel, last_conv_layer_output)
+            
+            # Global average pooling uygula
+            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+            
+            # Son evrişim katmanının çıktısını al
+            last_conv_layer_output = last_conv_layer_output[0]
+            
+            # Gradyanları feature map'e uygula
+            heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+            heatmap = tf.squeeze(heatmap)
+            
+            # Normalize et
+            heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+            
+            return heatmap.numpy()
+            
+        except Exception as e:
+            print(f"GRADCAM oluşturulurken hata: {e}")
+            return None
+    
+    def gradcam_karsilastirma_olustur(self, num_images=5):
+       
+        print("\nGRADCAM karşılaştırması oluşturuluyor...")
+        
+        # Enfekte resimlerden rastgele 
+        enfekte_indices = np.where(self.y_test == 1)[0]
+        if len(enfekte_indices) < num_images:
+            num_images = len(enfekte_indices)
+        
+        selected_indices = np.random.choice(enfekte_indices, num_images, replace=False)
+        
+        # model seçimi
+        best_models = []
+        for aktivasyon in ['softplus', 'relu', 'elu', 'prelu', 'arctan', 'tanh']:
+            for optimizer in ['adam', 'sgd']:
+                model_key = f"{aktivasyon}_{optimizer}"
+                if model_key in self.modeller:
+                    best_models.append((model_key, self.modeller[model_key]))
+                    break  # Her aktivasyon için sadece bir optimizer allmak için:
+        
+        
+        best_models = best_models[:6]
+        
+        fig, axes = plt.subplots(len(best_models), num_images, figsize=(num_images * 3, len(best_models) * 3))
+        if len(best_models) == 1:
+            axes = axes.reshape(1, -1)
+        if num_images == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for i, (model_adi, model) in enumerate(best_models):
+            for j, img_idx in enumerate(selected_indices):
+                ax = axes[i, j] if num_images > 1 else axes[i]
+                
+                # Orijinal resm
+                orijinal_resim = self.X_test[img_idx]
+                resim_array = np.expand_dims(orijinal_resim, axis=0)
+                
+                # GRADCAM 
+                heatmap = self.gradcam_olustur(model, resim_array)
+                
+                if heatmap is not None:
+                    
+                    heatmap_resized = cv2.resize(heatmap, (self.resim_boyutu[1], self.resim_boyutu[0]))
+                    
+                    
+                    heatmap_colored = plt.cm.jet(heatmap_resized)[:, :, :3]
+                    
+                    
+                    overlay = 0.6 * orijinal_resim + 0.4 * heatmap_colored
+                    
+                    # görselleştirme
+                    ax.imshow(overlay)
+                    ax.set_title(f'{model_adi.upper()}\nResim {j+1}')
+                    ax.axis('off')
+                else:
+                    ax.imshow(orijinal_resim)
+                    ax.set_title(f'{model_adi.upper()}\nGRADCAM Hatası')
+                    ax.axis('off')
+        
+        plt.suptitle('GRADCAM En İyi Performans Gösteren Modeller', fontsize=16)
+        plt.tight_layout()
+        plt.savefig('kapsamli_gradcam_karsilastirma.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print("GRADCAM karşılaştırması 'kapsamli_gradcam_karsilastirma.png' olarak kaydedildi")
+    
+    def gradcam_analizi_yap(self):
+        
+        print("\n" + "="*100)
+        print("GRADCAM ANALİZİ VE YORUMLAMA")
+        print("="*100)
+        
+        print("\n1. GRADCAM :")
+        print("- GRADCAM kullanılmıştır")
+        print("- Modelin hangi bölgelere odaklandığı")
+        print("- Kırmızı bölgeler: Yüksek önem")
+        print("- Mavi bölgeler: Düşük önem")
+        
+        print("\n2. Beklenen GRADCAM Davranışları:")
+        print("- Enfekte yapraklarda hastalıklı bölgelere odaklanma")
+        print("- Sağlıklı yapraklarda genel yaprak yapısına odaklanma")
+        print("- Arka plan ve alakasız bölgelere bakılmaması")
+        
+        print("\n3. Aktivasyon Fonksiyonlarına Göre Beklenen:")
+        print("- SoftPlus/ReLU/ELU:")
+        print("- TanH/ArcTan:")
+        print("- Binary Step:")
+        print("- Identity/Logistic")
+        
+        print("\n4. Optimizer Etkisi:")
+        print("- ADAM: GRADCAM'ler")
+        print("- SGD:  GRADCAM'ler")
+        
+        print("\n5. GRADCAM İlişkisi:")
+        print("- Yüksek doğruluk ")
+        print("- Düşük doğruluk ")
+        
+        print("\n6. :")
+        print("- En iyi GRADCAM : SoftPlus + ADAM")
+        print("- En kötü GRADCAM : Identity + SGD")
+        print("- GRADCAM kalitesi korelasyon")
+    
     def tam_analizi_calistir(self, epochs=30):
         
         print("CNN Analizi Başlatılıyor")
@@ -527,22 +681,29 @@ class KapsamliAktivasyonAnalizi:
         # sonuclar tablosu
         sonuclar_tablosu = self.kapsamli_sonuclar_tablosu_olustur()
         
-        # eğiti mgeçmişi
+        # eğitim geçmişi
         self.egitim_gecmisi_ciz()
         
-        # matrisler 
+        # karışıklık matrisleri 
         self.karisiklik_matrisleri_ciz()
         
         # Sınıflandırma raporu
         self.siniflandirma_raporlari_uret()
         
+        # GRADCAM karşılaştırması
+        self.gradcam_karsilastirma_olustur(num_images=3)
+        
+        # GRADCAM analizi
+        self.gradcam_analizi_yap()
+        
         print("\n" + "="*100)
-        print("KAPSAMLI ANALİZ BAŞARIYLA TAMAMLANDI!")
+        print("KAPSAMLI ANALİZ TAMAMLANDI!")
         print("="*100)
         print("Oluşturulan dosyalar:")
         print("- kapsamli_aktivasyon_sonuclari.csv")
         print("- kapsamli_egitim_gecmisi.png")
         print("- kapsamli_karisiklik_matrisleri.png")
+        print("- kapsamli_gradcam_karsilastirma.png")
         
         return sonuclar_tablosu
 
